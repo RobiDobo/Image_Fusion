@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Image with SSID Markers</title>
+    <style>
+        .container {
+            position: relative;
+            width: 1500px;
+            height: 375px;
+            background-image: url('final_image.png'); /* Path to your image */
+            background-size: cover;
+        }
+        .dot {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: red;
+            cursor: pointer;
+            transition: transform 0.3s ease-in-out;
+        }
+        .dot:hover {
+            transform: scale(3);
+            background-color: blue;
+        }
+        .ssid-names {
+            position: absolute;
+            background-color: white;
+            padding: 5px;
+            font-size: 12px;
+            display: none;
+            border-radius: 5px;
+        }
+        .dot:hover + .ssid-names {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container" id="image-container"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+<script>
+    // Initialize ssidData as an empty array to store parsed data
+    let ssidData = {};
+
+    // Function to load CSV files from the 'horizontal' folder
+    function loadCSVFiles() {
+        const folderPath = "horizontal";  // Folder path for horizontal CSV files
+        const fileNames = ["combined_bssid_locations.csv"];  // List of CSV filenames to process
+
+        // Loop over the filenames
+        fileNames.forEach(fileName => {
+            const csvPath = folderPath + "/" + fileName;
+
+            // Fetch the CSV file using JavaScript fetch API (you can also use other methods to fetch files from your server)
+            fetch(csvPath)
+                .then(response => response.text())
+                .then(csvText => {
+                    // Parse the CSV content
+                    Papa.parse(csvText, {
+                        complete: function(results) {
+                            const parsedData = results.data;
+
+                            // Loop through each row and extract relevant data
+                            parsedData.forEach(row => {
+                                if (row.ssid && row.x_marker && row.y_marker) {
+                                    const x_marker = parseInt(row.x_marker);
+                                    const y_marker = parseInt(row.y_marker);
+
+                                    // Ensure the key for each (x_marker, y_marker) exists in the ssidData object
+                                    if (!ssidData[`${x_marker},${y_marker}`]) {
+                                        ssidData[`${x_marker},${y_marker}`] = [];
+                                    }
+
+                                    // Add the SSID to the array at the corresponding grid position
+                                    ssidData[`${x_marker},${y_marker}`].push(row.ssid);
+                                }
+                            });
+
+                            // After loading all CSVs, place dots on the image
+                            placeDots();
+                        },
+                        header: true,  // Ensure the CSV file has headers
+                    });
+                })
+                .catch(error => console.error("Error reading CSV file:", error));
+        });
+    }
+
+    // Function to place SSID dots on the image based on ssidData
+    function placeDots() {
+        const container = document.getElementById('image-container');
+
+        // Loop over the ssidData object to place a dot for each unique (x_marker, y_marker)
+        Object.keys(ssidData).forEach(key => {
+            const [x_marker, y_marker] = key.split(',').map(Number);
+            
+            // Calculate pixel positions based on markers
+            const x_pixel = (x_marker - 1) * (1500 / 30) + (1500 / 30) / 2;
+            const y_pixel = (y_marker - 1) * (375 / 5) + (375 / 5) / 2;
+
+            // Create dot element
+            const dot = document.createElement('div');
+            dot.className = 'dot';
+            dot.style.left = `${x_pixel}px`;
+            dot.style.top = `${y_pixel}px`;
+
+            // Create a div to hold all SSIDs for this (x_marker, y_marker)
+            const ssidNames = document.createElement('div');
+            ssidNames.className = 'ssid-names';
+            ssidNames.style.left = `${x_pixel}px`;
+            ssidNames.style.top = `${y_pixel + 15}px`; // Position the name below the dot
+
+            // Display all SSIDs at this location
+            ssidData[key].forEach(ssid => {
+                const ssidElement = document.createElement('p');
+                ssidElement.textContent = ssid;
+                ssidNames.appendChild(ssidElement);
+            });
+
+            // Append dot and SSID names to the container
+            container.appendChild(dot);
+            container.appendChild(ssidNames);
+        });
+    }
+
+    // Initialize the loading of CSV files when the page loads
+    window.onload = loadCSVFiles;
+</script>
+
+</body>
+</html>
