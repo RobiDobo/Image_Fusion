@@ -494,7 +494,7 @@ def overlay_heatmap_on_image(heatmap_path, final_image_path, output_path,transpa
     final_image = Image.open(final_image_path).convert("RGBA")  # Same here for final image
     colorbar = Image.open("colorbar.png").convert("RGBA")  # Load the colorbar image
     # Apply Gaussian blur to the heatmap
-    heatmap = heatmap.filter(ImageFilter.GaussianBlur(radius=2))
+    heatmap = heatmap.filter(ImageFilter.GaussianBlur(radius=9))
     # Ensure the heatmap and final image are the same size
     if heatmap.size != final_image.size:
         heatmap = heatmap.resize(final_image.size, Image.Resampling.LANCZOS)  # Resize heatmap to match
