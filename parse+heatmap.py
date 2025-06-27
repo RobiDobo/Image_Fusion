@@ -6,13 +6,16 @@ import numpy as np
 from scipy.interpolate import griddata
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+from matplotlib.colors import Normalize
 import seaborn as sns
 import re
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageTk
 from sklearn.cluster import DBSCAN
 from scipy.ndimage import gaussian_filter
 from sklearn.cluster import KMeans
 from scipy.spatial import cKDTree
+
+
 
 def rssi_to_percentage(rssi, min_rssi, max_rssi):
     """
@@ -76,6 +79,7 @@ def extract_coordinates(folder_name):
 
 def read_measurements(base_folder):
     """Read all measurements from the nested folder structure"""
+    base_folder = os.path.join(base_folder, "resources")  # Concatenate with "resources"
     print(f"Reading measurements from base folder: {base_folder}")
     all_measurements_vertical = []
     all_measurements_horizontal = []
@@ -219,24 +223,55 @@ def process_all_ssids(df,output_folder="bssid_locations"):
     return combined_bssid_locations
 
 
-def create_signal_heatmap(df, ssid_filter, df_name, title=None):
+def create_signal_heatmap(df, ssid_filter, bssid_filter, df_name, title=None, min_measurements=3):
     
     df_filtered = df[df['ssid'] == ssid_filter]  # First filter by SSID
     # Filter by BSSID
     df_filtered = df_filtered[df_filtered['bssid'] == bssid_filter]
-    df_filtered = df_filtered[df_filtered['signal'] < -10] 
+   
+    #df_filtered = df_filtered[df_filtered['signal'] < -10] 
     # Filter out erroneous RSSI values > -10 dBm 
+    df_filtered = df_filtered.sort_values(by=['x', 'y'])
+    # Debug: Save/print DataFrame BEFORE retaining max signal
+    print("DataFrame BEFORE retaining strongest signal:")
+    with pd.option_context('display.max_rows', None):
+        print(df_filtered)
+    df_filtered.to_csv(f"debug_before_max_signal_{df_name}.csv", index=False)
+
     
+# temp
+    # Keep only (x, y, bssid) groups with min_measurements
+    counts = df_filtered.groupby(['x', 'y', 'bssid']).size().reset_index(name='count')
+    valid_positions = counts[counts['count'] >= min_measurements][['x', 'y', 'bssid']]
+
+    # Merge to keep only valid positions in original df
+    df_valid = pd.merge(df_filtered, valid_positions, on=['x', 'y', 'bssid'])
+
+    # Debug: DataFrame after count-based filtering
+    print("\nDataFrame AFTER count-based filtering (only positions with ≥3 measurements):")
+    with pd.option_context('display.max_rows', None):
+        print(df_valid)
+    df_valid.to_csv(f"debug_after_count_filter_{df_name}.csv", index=False)
+#temp
 
     # Keep only max signal per (x, y, bssid)
-    df_cleaned = df_filtered.loc[df_filtered.groupby(['x', 'y', 'bssid'])['signal'].idxmax()]
+    df_cleaned = df_valid.groupby(['x', 'y', 'bssid', 'ssid'], as_index=False).agg({
+    'signal': 'mean',
+    'ssid': 'first'
+})
+    df_cleaned['signal'] = df_cleaned['signal'].round().astype(int)
     # Sort by 'x' and 'y' to ensure the coordinates are in order
     df_cleaned = df_cleaned.sort_values(by=['x', 'y'])
-    with pd.option_context('display.max_rows', None, 'display.max_columns', None): 
+    
+    # Debug: Save/print DataFrame AFTER retaining max signal
+    print("\nDataFrame AFTER retaining strongest signal:")
+    with pd.option_context('display.max_rows', None):
         print(df_cleaned)
+    df_cleaned.to_csv(f"debug_after_max_signal_{df_name}.csv", index=False)
+    
     # Convert RSSI to percentage
     df_cleaned['signal_percentage'] = df_cleaned['signal'].apply(lambda rssi: rssi_to_percentage(rssi, -100, -20))
-
+    print(df_cleaned['signal_percentage'])
     # Save the cleaned dataframe to a CSV file for review
     cleaned_filename = f"df_cleaned_{df_name}.csv"
     df_cleaned.to_csv(cleaned_filename, index=False)
@@ -253,22 +288,23 @@ def create_signal_heatmap(df, ssid_filter, df_name, title=None):
         x_pos = int(row['x']) - 1  # Adjust for 0-based indexing
         y_pos = int(row['y']) - 1  # Adjust for 0-based indexing
         grid_z[x_pos, y_pos] = row['signal_percentage']
-
-    
+    print(np.min(grid_z.T), np.max(grid_z.T))
+    print("grid with elevation on ox axis")
+    print(grid_z)
+    print(" ")
+    print("now how it looks like in the image(OY axis is not flipped yet)")
+    print(grid_z.T)
     # Scale the heatmap to match the target image size (7500x675)
-    figsize = (1500 / 300, 375 / 300)  # Convert pixels to inches at 300 dpi
-    dpi = 300  # High quality
+    figsize = (1500/100 , 375/100 )  # Convert pixels to inches at 300 dpi
     
-    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    #grid_z_smoothed = gaussian_filter(grid_z, sigma=0.5)   
-    # Plot the heatmap using Seaborn with the grid
+    fig, ax = plt.subplots(figsize=figsize)
+    # Plot the heatmap using Seaborn with the gridA
     sns.heatmap(grid_z.T,  # Transpose to match x, y axes properly
                 cmap='YlOrRd',  # Colormap for signal strength
-                
-                xticklabels=False,  # Hide x-axis labels (1 to 30)
-                yticklabels=False,  # Hide y-axis labels (1 to 5)
+                xticklabels=False, 
+                yticklabels=False, 
                 ax=ax,
-                cbar=False)  # Remove colorbar initially for custom placement
+                cbar=False)  
 
     # Invert the Y-axis to match image coordinates
     ax.invert_yaxis()
@@ -283,15 +319,15 @@ def create_signal_heatmap(df, ssid_filter, df_name, title=None):
     print("Heatmap created.")
     
     # Filenames for both images
-    filename_with_labels = f"heatmap_with_labels_{df_name}.png"
+    filename_unscaled = f"heatmap_unscaled_{df_name}.png"
     filename_scaled = f"heatmap_scaled_{df_name}.png"
     
     # Save the heatmap with labels first
-    plt.savefig(filename_with_labels, bbox_inches="tight", pad_inches=0, transparent=True)
-    print(f"Heatmap with labels saved as {filename_with_labels}.")
+    plt.savefig(filename_unscaled, bbox_inches="tight", pad_inches=0, transparent=True)
+    print(f"Heatmap with labels saved as {filename_unscaled}.")
     
     # Now scale the image to 7500x675 pixels (without labels)
-    img = Image.open(filename_with_labels)
+    img = Image.open(filename_unscaled)
     img = img.resize((1500, 375), Image.Resampling.LANCZOS)  # Resize to 7500x675 pixels
     img.save(filename_scaled)  # Save the resized image without labels
     print(f"Scaled heatmap saved as {filename_scaled}.")
@@ -386,49 +422,70 @@ def list_available_ssids(base_folder):
     print("No SSIDs found.")
     return []
 
+def list_bssids_for_ssid(base_folder, selected_ssid):
+    """List all BSSIDs for the selected SSID in the dataset."""
+    print(f"Listing BSSIDs for SSID: {selected_ssid}...")
+    vertical_df, _ = read_measurements(base_folder)
+    
+    if not vertical_df.empty:
+        # Filter by the selected SSID
+        filtered_df = vertical_df[vertical_df['ssid'] == selected_ssid]
+        
+        if not filtered_df.empty:
+            # List unique BSSIDs for the selected SSID
+            bssids = sorted(filtered_df['bssid'].unique())
+            print(f"BSSIDs for SSID {selected_ssid}:")
+            for bssid in bssids:
+                print(f"- {bssid}")
+            return bssids
+        else:
+            print(f"No BSSIDs found for SSID {selected_ssid}.")
+            return []
+    print("No SSIDs found in the dataset.")
+    return []
 def collect_and_crop_images_with_folder_names(base_folder, output_folder, crop_box):
     """
-    Collect all .png images from nested folders, save them with folder-based names,
-    and crop each image to the specified crop box.
+    Look inside 'base_folder/resources', crop the first .png from each subfolder,
+    and save it as '{subfolder}.png' into output_folder.
 
     Args:
-    - base_folder (str): The base folder to search for .png files.
-    - output_folder (str): The folder where cropped images will be saved.
-    - crop_box (tuple): The region to crop (left, upper, right, lower).
+    - base_folder (str): The base folder that contains the 'resources' subfolder.
+    - output_folder (str): Folder to save cropped images.
+    - crop_box (tuple): (left, upper, right, lower) crop coordinates.
     """
-    print(f"Scanning for images in base folder: {base_folder}")
+    resources_folder = os.path.join(base_folder, "resources")
+    print(f"Scanning subfolders inside: {resources_folder}")
     os.makedirs(output_folder, exist_ok=True)
-    
-    for folder_name in os.listdir(base_folder):
-        folder_path = os.path.join(base_folder, folder_name)
 
-        # Skip if not a directory
-        if not os.path.isdir(folder_path):
-            print(f"Skipping non-directory: {folder_path}")
-            continue
+    if not os.path.isdir(resources_folder):
+        print(f"❌ 'resources' folder not found at: {resources_folder}")
+        return
 
-        # Check for .png images in this folder
-        for file_name in os.listdir(folder_path):
+    for folder_name in os.listdir(resources_folder):
+        subfolder_path = os.path.join(resources_folder, folder_name)
+
+        if not os.path.isdir(subfolder_path):
+            continue  # skip non-folders
+
+        # Find the first .png in this subfolder
+        for file_name in os.listdir(subfolder_path):
             if file_name.lower().endswith('.png'):
+                file_path = os.path.join(subfolder_path, file_name)
                 output_path = os.path.join(output_folder, f"{folder_name}.png")
-               
-                # Skip if the output file already exists
-                if (os.path.exists(output_path) or (output_path.endswith('cropped_images.png'))):
-                    #print(f"Skipping existing cropped image: {output_path}")
-                    continue
-                
-                file_path = os.path.join(folder_path, file_name)
-                #print(f"Found image: {file_path}")
-                
-                # Open and crop the image
-                with Image.open(file_path) as img:
-                    cropped_img = img.crop(crop_box)
-                    
-                    # Save the cropped image to the output folder with folder-based name
-                    output_path = os.path.join(output_folder, f"{folder_name}.png")
-                    cropped_img.save(output_path)
-                    print(f"Saved cropped image as: {output_path}")
 
+                if os.path.exists(output_path):
+                    print(f"Skipping already existing: {output_path}")
+                    break
+
+                try:
+                    with Image.open(file_path) as img:
+                        cropped_img = img.crop(crop_box)
+                        cropped_img.save(output_path)
+                        print(f"✅ Saved cropped image: {output_path}")
+                except Exception as e:
+                    print(f"❌ Failed to process {file_path}: {e}")
+                break  # Only one image per folder
+            
 def concatenate_images(image_folder):
     # Sort and group images by X value
     grouped_images = {}
@@ -526,7 +583,7 @@ def overlay_heatmap_on_image(heatmap_path, final_image_path, output_path,transpa
     print(f"Overlayed image saved as {output_path} \n")
 
     # Show the combined image (optional)
-    final_combined.show()
+    #final_combined.show()
 
 import numpy as np
 import pandas as pd
@@ -559,6 +616,7 @@ def analyze_wifi_signals(data: pd.DataFrame) -> Dict:
         ssid = bssid_data['ssid'].iloc[0]
         
         # Find strongest signal value
+        print(bssid_data['signal'])
         max_signal = bssid_data['signal'].max()
         
         # Identify all strong points with the maximum signal
@@ -713,121 +771,156 @@ def add_ssid_markers_to_image(csv_folder, image_path, output_image_path):
     # Save the output image
     img.save(output_image_path)
     print(f"Image saved with SSID markers as {output_image_path}")
-
+import tkinter as tk
+from tkinter import messagebox, filedialog
 # Example usage
 if __name__ == "__main__":
-    # Use the current directory as base folder
-    base_folder = os.getcwd()
-    
-    #prints available ssids
+        # Main window setup
+    root = tk.Tk()
+    root.title("Wi-Fi Heatmap Generator")
+
+    # Display SSIDs in a listbox
+    ssid_label = tk.Label(root, text="Available SSIDs:")
+    ssid_label.pack()
+
+    ssid_listbox = tk.Listbox(root)
+    ssid_listbox.pack()
+    ssid_listbox.bind("<<ListboxSelect>>", lambda event: on_ssid_select())
+    def on_ssid_select():
+        selected_indices = ssid_listbox.curselection()
+        if selected_indices:
+            selected_ssid = ssid_listbox.get(selected_indices[0])
+            ssid_input.delete(0, tk.END)
+            ssid_input.insert(0, selected_ssid)
+    # Populate SSID list
+    base_folder = os.getcwd()  # Or use a folder path here
     ssids = list_available_ssids(base_folder)
+    for ssid in ssids:
+        ssid_listbox.insert(tk.END, ssid)
+
+    # Entry fields for SSID and BSSID input
+    ssid_input_label = tk.Label(root, text="Enter SSID:")
+    ssid_input_label.pack()
+
+    ssid_input = tk.Entry(root)
+    ssid_input.pack()
+
+    bssid_input_label = tk.Label(root, text="Enter BSSID:")
+    bssid_input_label.pack()
+
+    bssid_input = tk.Entry(root)
+    bssid_input.pack()
+
+    # Entry field for Minimum Measurements
+    min_measurements_label = tk.Label(root, text="Minimum Measurements per Position:")
+    min_measurements_label.pack()
+
+    min_measurements_input = tk.Entry(root)
+    min_measurements_input.insert(0, "3")  # Default value
+    min_measurements_input.pack()
     
-    if len(ssids) > 0:
-        # specify which ssid to work on
-        #B129,A0:F3:C1:6A:30:36
-        #A_306,F8:D1:11:41:11:BC
-        #B714,00:1F:CF:11:7F:56
-        #DCTI-PUBLIC,E0:1C:FC:94:19:32
-        #B029 A8:42:A1:69:A0:56
-        #DecanatET_Guest ea:c3:2a:c9:28:ba
-        #B329,E8:48:B8:64:B6:C3,-62,2.422
-        #A304,98:DA:C4:3F:10:A7,-62,2.462
-        ssid_filter = "A_306"  
-        bssid_filter="F8:D1:11:41:11:BC"
+    
+    # Frame to hold images
+    image_frame = tk.Frame(root)
+    image_frame.pack(side=tk.RIGHT, padx=10, pady=10)
+
+    # Labels to display images
+    vertical_image_label = tk.Label(image_frame)
+    vertical_image_label.pack(side=tk.TOP, padx=5, pady=5)
+
+    horizontal_image_label = tk.Label(image_frame)
+    horizontal_image_label.pack(side=tk.TOP, padx=5, pady=5)
+    
+    vertical_photo = None
+    horizontal_photo = None
+    # Buttons to trigger actions
+    def on_generate_heatmap():
+        ssid_filter = ssid_input.get()  # Get the SSID from the entry field
+        bssid_filter = bssid_input.get()  # Get the BSSID from the entry field
+        min_measurements = int(min_measurements_input.get())  # Read user input as int
         vertical_df, horizontal_df = read_measurements(base_folder)
+        create_signal_heatmap(vertical_df, ssid_filter, bssid_filter, "vertical",min_measurements=min_measurements)
+        create_signal_heatmap(horizontal_df, ssid_filter, bssid_filter, "horizontal",min_measurements=min_measurements)
+        messagebox.showinfo("Success", "Heatmaps generated successfully!")
+
+    def on_crop_and_concatenate():
+        crop_box = (290, 210, 340, 285)  
+        collect_and_crop_images_with_folder_names(base_folder, "cropped_images", crop_box)
+        concatenate_images("cropped_images")
+        messagebox.showinfo("Success", "Images cropped and concatenated!")
+
+    def on_overlay_heatmap():
+        global vertical_photo, horizontal_photo
+        overlay_heatmap_on_image('heatmap_scaled_vertical.png', 'final_image.png', 'final_output_vertical.png')
+        overlay_heatmap_on_image('heatmap_scaled_horizontal.png', 'final_image.png', 'final_output_horizontal.png')
+
+        # Load images and display them in the labels
+        try:
+            vertical_image = Image.open('final_output_vertical.png')
+            vertical_image.thumbnail((640, 480), Image.Resampling.LANCZOS)
+            vertical_photo = ImageTk.PhotoImage(vertical_image)
+            vertical_image_label.config(image=vertical_photo)
+            vertical_image_label.image = vertical_photo  # Keep a reference!
+
+            horizontal_image = Image.open('final_output_horizontal.png')
+            horizontal_image.thumbnail((640, 480), Image.Resampling.LANCZOS) 
+            horizontal_photo = ImageTk.PhotoImage(horizontal_image)
+            horizontal_image_label.config(image=horizontal_photo)
+            horizontal_image_label.image = horizontal_photo  # Keep a reference!
+
+            messagebox.showinfo("Success", "Heatmaps overlaid on images and displayed!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load and display images:\n{e}")
+
+    def on_list_bssids():
+        # Get the selected SSID from the listbox
+        selected_ssid = ssid_listbox.get(tk.ACTIVE)  # Gets the currently selected SSID
         
-        # Generate and show individual heatmaps
-        
-        create_signal_heatmap(vertical_df, ssid_filter,df_name="vertical")
-        create_signal_heatmap(horizontal_df, ssid_filter,df_name="orizontal")
-    else:
-        print("No measurements found in the specified folder.")
-        
-    # Crop and concatenate images
-    #crop_box = (200, 165, 450, 300) 
-    crop_box = (290, 210, 340, 285)
-    #or (290, 195, 340, 265)
+        if selected_ssid:
+            bssids = list_bssids_for_ssid(base_folder, selected_ssid)
+            # Show the BSSIDs in the GUI (e.g., in a new label or text box)
+            if bssids:
+                bssid_display.delete(0, tk.END)  # Clear previous BSSIDs
+                for bssid in bssids:
+                    bssid_display.insert(tk.END, bssid)  # Display BSSIDs in a text box
+            else:
+                messagebox.showinfo("No BSSIDs", "No BSSIDs found for the selected SSID.")
+        else:
+            messagebox.showwarning("No SSID Selected", "Please select an SSID first.")
 
-    #collect_and_crop_images_with_folder_names(base_folder, 'cropped_images', crop_box)
-    #concatenate_images('cropped_images').show() #COMMENTED BECAUSE ALREADY COLLECTED CROPPED IMAGES AND MADE FINAL IMAGE
-    overlay_heatmap_on_image('heatmap_scaled_vertical.png', 'final_image.png', 'final_output_vertical.png')
-    overlay_heatmap_on_image('heatmap_scaled_orizontal.png', 'final_image.png', 'final_output_horizontal.png')
-    combined_bssid_locations_df = process_all_ssids(vertical_df,"vertical")
-    combined_bssid_locations_df = process_all_ssids(horizontal_df,"horizontal")
-    add_ssid_markers_to_image("horizontal","final_output_horizontal.png","horizontal_final_image_with_ssid_markers.png")
-    add_ssid_markers_to_image("vertical","final_output_vertical.png","vertical_final_image_with_ssid_markers.png")
-"""
-vertical_df_ssid = vertical_df[vertical_df['ssid'] == ssid_filter]
-results = analyze_wifi_signals(vertical_df_ssid)
-print("Available BSSIDs in results:", results.keys())
-bssid_info = results[bssid_filter]
-print("Analysis for vertical polarization:")
-print(f"SSID: {bssid_info['ssid']}")
-print(f"Strongest Signal Points:")
-print(bssid_info['strongest_signal'])
-print(f"Estimated source at: ({bssid_info['estimated_location']['x']}, {bssid_info['estimated_location']['y']})using weighted average")
-print(f"Signal statistics:")
-print(f"Mean: {bssid_info['stats']['mean_signal']:.2f}")
-#print(f"Max: {bssid_info['stats']['max_signal']:.2f}")
-#print(f"Min: {bssid_info['stats']['min_signal']:.2f}")
-print(f"Std: {bssid_info['stats']['std_signal']:.2f}")
-#print(f"Number of measurements: {bssid_info['stats']['num_measurements']}")
-#print(f"Measurement area: {bssid_info['stats']['measurement_area']}")
+    # Generate heatmap button
+    generate_heatmap_button = tk.Button(root, text="Generate Heatmaps", command=on_generate_heatmap)
+    generate_heatmap_button.pack()
 
-#with pd.option_context('display.max_rows', None, 'display.max_columns', None): 
-#        print(vertical_df_ssid)
-        
-horizontal_df_ssid = horizontal_df[horizontal_df['ssid'] == ssid_filter]
-results = analyze_wifi_signals(horizontal_df_ssid)
-bssid_info = results[bssid_filter]
-print("Analysis for horizontal polarization:")
-print(f"SSID: {bssid_info['ssid']}")
-print(f"Strongest Signal Points: ({bssid_info['strongest_signal']})")
-print(f"Estimated source at: ({bssid_info['estimated_location']['x']}, {bssid_info['estimated_location']['y']}) using weighted average")
-print(f"Signal statistics:")
-print(f"Mean: {bssid_info['stats']['mean_signal']:.2f}")
-#print(f"Max: {bssid_info['stats']['max_signal']:.2f}")
-#print(f"Min: {bssid_info['stats']['min_signal']:.2f}")
-print(f"Std: {bssid_info['stats']['std_signal']:.2f}")
-#print(f"Number of measurements: {bssid_info['stats']['num_measurements']}")
-#print(f"Measurement area: {bssid_info['stats']['measurement_area']}")
+    # Crop and concatenate button
+    crop_concatenate_button = tk.Button(root, text="Crop & Concatenate Images", command=on_crop_and_concatenate)
+    crop_concatenate_button.pack()
 
-"""
-#with pd.option_context('display.max_rows', None, 'display.max_columns', None): 
-#        print(horizontal_df_ssid)
+    # Overlay heatmap button
+    overlay_button = tk.Button(root, text="Overlay Heatmap on Image", command=on_overlay_heatmap)
+    overlay_button.pack()
 
+        # Display BSSIDs in a Text widget
+    bssid_display_label = tk.Label(root, text="BSSIDs for selected SSID:")
+    bssid_display_label.pack()
 
+    bssid_display = tk.Listbox(root, height=5, width=50)
+    bssid_display.pack()
+    bssid_display.bind("<<ListboxSelect>>", lambda event: on_bssid_select())
+    def on_bssid_select():
+        selected_indices = bssid_display.curselection()
+        if selected_indices:
+            selected_bssid = bssid_display.get(selected_indices[0])
+            bssid_input.delete(0, tk.END)
+            bssid_input.insert(0, selected_bssid)
+            
+    # Button to list BSSIDs for the selected SSID
+    list_bssids_button = tk.Button(root, text="List BSSIDs", command=on_list_bssids)
+    list_bssids_button.pack()
 
-# Selecting RSSI and other relevant columns
-#X = staffcm_df[['signal']].values
+    # Run the application
+    root.mainloop()
+    root.destroy()
 
-# Applying DBSCAN
-#db = DBSCAN(eps=2, min_samples=3).fit(X)
-
-# Adding the cluster labels to the DataFrame
-#staffcm_df['cluster'] = db.labels_
-
-# Find clusters with high RSSI
-#high_rssi_clusters = staffcm_df[staffcm_df['signal'] > 70]  # Adjust threshold as needed
-#print(high_rssi_clusters)
-
-# Create a 3D plot for x, y, and RSSI
-#fig = plt.figure(figsize=(10, 7))
-#ax = fig.add_subplot(111, projection='3d')
-
-# Scatter plot: x, y, RSSI with colors based on the clusters
-#sc = ax.scatter(high_rssi_clusters['x'], high_rssi_clusters['y'], high_rssi_clusters['signal'], 
-#                c=high_rssi_clusters['cluster'], cmap='viridis', s=50)
-
-# Add labels and title
-#ax.set_title("RSSI Clustering with DBSCAN - 3D Plot (X, Y, RSSI)")
-#ax.set_xlabel("X Position")
-#ax.set_ylabel("Y Position")
-#ax.set_zlabel("Signal Strength (RSSI)")
-
-# Add color bar to show RSSI cluster coloring
-#cbar = plt.colorbar(sc)
-#cbar.set_label('Cluster ID')
-
-# Show the plot
-#plt.show()
+    import gc
+    gc.collect()
